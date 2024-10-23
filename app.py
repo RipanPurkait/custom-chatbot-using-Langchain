@@ -1,59 +1,79 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
-from langchain_huggingface import HuggingFaceEmbeddings 
-from langchain_community.vectorstores import FAISS
+from langchain.embeddings.huggingface import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain_community.document_loaders import WebBaseLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# Initialize FastAPI app
+# Define FastAPI app
 app = FastAPI()
 
-# Create a class to handle the input structure for texts
-class TextItem(BaseModel):
-    page_content: str
-
-class QueryRequest(BaseModel):
-    query: str
-    k: int = 5  # Optional, default to 5 results
-
-# Initialize vector store globally (in memory)
+# Global variable for vector store
 vector_store = None
 
-# Step 1: API to create vector store from documents
-@app.post("/create-vector-store")
-def create_vector_store_api(texts: List[TextItem]):
-    global vector_store
+# Request model for query input
+class QueryRequest(BaseModel):
+    query: str
+    k: int = 5  # Default to top 5 answers
+
+# Function to extract and process data from a URL
+def extract_data_from_url(url: str):
+    loader = WebBaseLoader(url)
+    documents = loader.load()
+
+    # Split documents into chunks (to handle token limits)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    texts = text_splitter.split_documents(documents)
+    return texts
+
+# Function to create vector store using Hugging Face Embeddings
+def create_vector_store(texts):
     hf_model = 'sentence-transformers/all-MiniLM-L6-v2'
     embeddings = HuggingFaceEmbeddings(model_name=hf_model)
 
-    # Convert list of TextItem to the required format (list of dicts with "page_content")
-    documents = [{"page_content": text.page_content} for text in texts]
-    
-    # Create vector store
-    vector_store = FAISS.from_documents(documents, embeddings)
-    
-    return {"message": "Vector store created successfully!"}
+    # Create and return FAISS vector store
+    vector_store = FAISS.from_documents(texts, embeddings)
+    return vector_store
 
-# Step 2: API to retrieve answers based on query
-@app.post("/retrieve-answer")
-def retrieve_answer_api(query_request: QueryRequest):
-    global vector_store
-    
-    if vector_store is None:
-        raise HTTPException(status_code=400, detail="Vector store not initialized. Please create it first.")
+# Function to retrieve answers based on a query
+def retrieve_answer(query: str, vector_store, k: int = 5):
+    hf_model = 'sentence-transformers/all-MiniLM-L6-v2'
+    embeddings = HuggingFaceEmbeddings(model_name=hf_model)
 
     # Embed the query
-    hf_model = 'sentence-transformers/all-MiniLM-L6-v2'
-    embeddings = HuggingFaceEmbeddings(model_name=hf_model)
-    query_embedding = embeddings.embed_query(query_request.query)
+    query_embedding = embeddings.embed_query(query)
 
-    # Retrieve top k results
-    docs = vector_store.similarity_search_by_vector(query_embedding, k=query_request.k)
+    # Perform similarity search
+    docs = vector_store.similarity_search_by_vector(query_embedding, k=k)
+
+    # Extract and return the top documents
     top_docs = [doc.page_content for doc in docs]
+    return top_docs
 
-    return {"query": query_request.query, "results": top_docs}
+# Endpoint to load data from URL and create vector store
+@app.post("/load-url/")
+def load_url(url: str):
+    global vector_store
+    try:
+        texts = extract_data_from_url(url)
+        vector_store = create_vector_store(texts)
+        return {"message": "Vector store created successfully", "document_count": len(texts)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing URL: {e}")
 
-# Step 3: API health check
-@app.get("/health")
-def health_check():
-    return {"status": "API is running"}
+# Endpoint to retrieve answers based on a query
+@app.post("/retrieve-answer/")
+def get_answer(query_request: QueryRequest):
+    global vector_store
+    if vector_store is None:
+        raise HTTPException(status_code=400, detail="Vector store is not initialized. Please load data first.")
+
+    try:
+        answers = retrieve_answer(query_request.query, vector_store, query_request.k)
+        return {"answers": answers}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving answer: {e}")
+
+
 
